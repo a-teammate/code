@@ -1213,7 +1213,15 @@ ICOMMANDERR(logformat, "ss", (char *logger_name, char *pattern),
     std::string pattern_s{pattern};
     logging.setLogFormat(logger_name_s, pattern_s)
 );
+namespace inexor {
+namespace rpc {
 
+
+extern void testclientrpc();
+COMMAND(testclientrpc, "");
+}
+
+}
 
 int main(int argc, char **argv)
 {
