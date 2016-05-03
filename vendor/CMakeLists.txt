@@ -299,7 +299,7 @@ endfunction()
 
 #### gRPC
 
-find_libs(GRPC_LIBRARIES gpr LIB grpc LIB grpc_unsecure LIB grpc++_unsecure)
+find_libs(GRPC_LIBRARIES gpr LIB grpc_unsecure LIB grpc++_unsecure)
 find_path(GRPC_INCLUDE_DIRS grpc/grpc.h)
 find_path(GRPCPP_INCLUDE_DIRS grpc++/grpc++.h)
 
