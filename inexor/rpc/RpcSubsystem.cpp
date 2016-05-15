@@ -1,104 +1,182 @@
 
 
-#include "inexor/rpc/RpcSubsystem.hpp"
-#include "inexor/util/Logging.hpp"
-#include <memory>
-#include <string>
-
 #include <grpc++/grpc++.h>
 
+
+#include <chrono>
+#include <iostream>
+#include <memory>
+#include <random>
+#include <string>
+#include <thread>
+
+#include <grpc/grpc.h>
+#include <grpc++/channel.h>
+#include <grpc++/client_context.h>
+#include <grpc++/create_channel.h>
+#include <grpc++/security/credentials.h>
+
+#include "inexor/rpc/RpcSubsystem.hpp"
+#include "inexor/util/Logging.hpp"
+
 #include "inexor/rpc/inexor_service.grpc.pb.h"
-#include "inexor/rpc/inexor_service.pb.h"
-
-
-using namespace inexor::util;
-SUBSYSTEM_REGISTER(rpc, inexor::rpc::RpcSubsystem);
-
 
 using grpc::Channel;
 using grpc::ClientContext;
+using grpc::ClientReader;
+using grpc::ClientReaderWriter;
+using grpc::ClientWriter;
+using grpc::Server;
+using grpc::ServerBuilder;
+using grpc::ServerContext;
+using grpc::ServerReader;
+using grpc::ServerReaderWriter;
+using grpc::ServerWriter;
 using grpc::Status;
-using grpc::CompletionQueue;
-using grpc::ClientAsyncResponseReader;
-using helloworld::HelloRequest;
-using helloworld::HelloReply;
-using helloworld::Greeter;
+using routeguide::Point;
+using routeguide::RouteNote;
+using routeguide::RouteGuide;
+using std::chrono::system_clock;
 
-namespace inexor {
-namespace rpc {
-
-class GreeterClient
-{
-private:
-    // Out of the passed in Channel comes the stub, stored here, our view of the
-    // server's exposed services.
-    std::unique_ptr<Greeter::Stub> stub_;
+class RouteGuideImpl final : public RouteGuide::Service {
 public:
-    GreeterClient(std::shared_ptr<Channel> channel)
-        : stub_(Greeter::NewStub(channel))
+    explicit RouteGuideImpl() { }
+
+    Status RouteChat(ServerContext* context, ServerReaderWriter<RouteNote, RouteNote>* stream) override
     {
-    }
+        std::vector<RouteNote> received_notes;
+        RouteNote note;
+        while (stream->Read(&note))
+        {
+            stream->Write(note);
+            received_notes.push_back(note);
+        }
 
-    // Assambles the client's payload, sends it and presents the response back from the server.
-    std::string SayHello(const std::string &user)
-    {
-        // Data we are sending to the server.
-        HelloRequest request;
-        request.set_name(user);
-
-        // Container for the data we expect from the server.
-        HelloReply reply;
-
-        // Context for the client. It could be used to convey extra information to
-        // the server and/or tweak certain RPC behaviors.
-        ClientContext context;
-
-        // The producer-consumer queue we use to communicate asynchronously with the
-        // gRPC runtime.
-        CompletionQueue cq;
-
-        // Storage for the status of the RPC upon completion.
-        Status status;
-
-        // stub_->AsyncSayHello() perform the RPC call, returning an instance we
-        // store in "rpc". Because we are using the asynchronous API, we need the
-        // hold on to the "rpc" instance in order to get updates on the ongoig RPC.
-        std::unique_ptr<ClientAsyncResponseReader<HelloReply> > rpc(
-            stub_->AsyncSayHello(&context, request, &cq));
-
-        // Request that, upon completion of the RPC, "reply" be updated with the
-        // server's response; "status" with the indication of whether the operation
-        // was successful. Tag the request with the integer 1.
-        rpc->Finish(&reply, &status, (void*)1);
-        void* got_tag;
-        bool ok = false;
-        // Block until the next result is available in the completion queue "cq".
-        cq.Next(&got_tag, &ok);
-
-        // Verify that the result from "cq" corresponds, by its tag, our previous request.
-        GPR_ASSERT(got_tag == (void*)1);
-        // ... and that the request was completed successfully. Note that "ok"
-        // corresponds solely to the request for updates introduced by Finish().
-        GPR_ASSERT(ok);
-
-        // Act upon the status of the actual RPC.
-        if(status.ok()) return reply.message();
-        else            return "RPC failed";
+        return Status::OK;
     }
 };
 
-void testclientrpc()
+void RunServer()
 {
-    // Instantiate the client. It requires a channel, out of which the actual RPCs
-    // are created. This channel models a connection to an endpoint (in this case,
-    // localhost at port 50051). We indicate that the channel isn't authenticated
-    // (use of InsecureChannelCredentials()).
-    GreeterClient greeter(grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials()));
-    std::string user("world");
-    std::string reply = greeter.SayHello(user);  // The actual RPC call!
-    spdlog::get("global")->info() << "Greeter received: "; // << reply;
+    std::thread t([]
+    {
+        std::string server_address("0.0.0.0:50051");
+        RouteGuideImpl service;
 
+        ServerBuilder builder;
+        builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+        builder.RegisterService(&service);
+
+        std::unique_ptr<Server> server(builder.BuildAndStart());
+        spdlog::get("global")->info() << "Server listening on " << server_address;
+        server->Wait();
+    }
+    );
+    t.detach();
 }
 
+//////// Client
+
+Point MakePoint(long latitude, long longitude)
+{
+    Point p;
+    p.set_latitude(latitude);
+    p.set_longitude(longitude);
+    return p;
 }
+
+RouteNote MakeRouteNote(const std::string& message, long latitude, long longitude)
+{
+    RouteNote n;
+    n.set_msg(message);
+    n.mutable_location()->CopyFrom(MakePoint(latitude, longitude));
+    return n;
 }
+
+class RouteGuideClient
+{
+private:
+
+    std::unique_ptr<RouteGuide::Stub> stub_;
+
+public:
+    RouteGuideClient(std::shared_ptr<Channel> channel)
+        : stub_(RouteGuide::NewStub(channel)) { }
+
+    void RouteChat()
+    {
+        ClientContext context;
+
+        std::shared_ptr<ClientReaderWriter<RouteNote, RouteNote> > stream(stub_->RouteChat(&context));
+
+        std::thread writer([stream]()
+        {
+            std::vector<RouteNote> notes{
+                MakeRouteNote("First message", 0, 0),
+                MakeRouteNote("Second message", 0, 1),
+                MakeRouteNote("Third message", 1, 0),
+                MakeRouteNote("Fourth message", 0, 0) };
+            for (const RouteNote& note : notes) {
+                spdlog::get("global")->info() << "Sending message " << note.msg() << " at " << note.location().latitude() << ", " << note.location().longitude();
+                stream->Write(note);
+            }
+            stream->WritesDone();
+        });
+
+        RouteNote server_note;
+        while (stream->Read(&server_note)) {
+            spdlog::get("global")->info() << "Got message " << server_note.msg() << " at " << server_note.location().latitude() << ", " << server_note.location().longitude();
+        }
+        writer.join();
+        Status status = stream->Finish();
+        if (!status.ok()) {
+            spdlog::get("global")->info() << "RouteChat rpc failed.";
+        }
+    }
+};
+
+void clientrpc()
+{
+    RouteGuideClient guide(grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials()));
+
+    guide.RouteChat();
+}
+
+
+//struct changedvar
+//{
+//    /// Points to the var which needs to be updated.
+//    void *pointer;
+//    /// one of t
+//    int datatype;
+//    bool hasfunctionattached;
+//    void *cb_function; // function which gets executed
+//
+//    union {
+//        const char *str;
+//        int 
+//    };
+//
+//};
+//void receivemessage()
+//{
+//    const char *inputpath; // /inputname
+//    lookuptree("")
+//}
+//
+//void otherthread()
+//{
+//
+//}
+//
+//void onchangelistener()
+//{
+//    enque(variablename, value);
+//}
+//
+//void mainthread
+//{
+//
+//
+//}
+
