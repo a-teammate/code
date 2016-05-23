@@ -29,6 +29,8 @@ bin*
 
 Debug
 
+inexor/gluebuild*
+
 # Logs
 logs
 *.log
