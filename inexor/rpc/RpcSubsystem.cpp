@@ -6,9 +6,11 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <unordered_map>
 #include <random>
 #include <string>
 #include <thread>
+#include <stdint.h>
 
 #include <grpc/grpc.h>
 #include <grpc++/channel.h>
@@ -16,13 +18,15 @@
 #include <grpc++/create_channel.h>
 #include <grpc++/security/credentials.h>
 
+#include <moodycamel/concurrentqueue.h>
+#include <moodycamel/blockingconcurrentqueue.h>
+
 #include "inexor/rpc/RpcSubsystem.hpp"
 #include "inexor/util/Logging.hpp"
+#include "inexor/rpc/SharedVar.hpp"
 
 #include "inexor/rpc/inexor_service.grpc.pb.h"
 
-#include <moodycamel/concurrentqueue.h>
-#include <moodycamel/blockingconcurrentqueue.h>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -39,52 +43,120 @@ using grpc::ServerCompletionQueue;
 using inexor::tree::ChangedValue;
 using inexor::tree::TreeService;
 
-/*
-// Helper (Maybe): Can we get sth like this maybe?
-void findsetfield(inexor::tree::Value val)
-{
-    const std::string path = val.GetTypeName();
-    val.GetDescriptor()->FindFieldByName(path);
-    val.innerqueue().innerthing();
-}
+typedef int64_t int64; // size is important for us, proto explicitly specifies int64
 
-// This one gets generated
-void connectall()
+struct net2maintupel
 {
-    auto lambdaj = [](const T &oldvalue, const T &newvalue)
-    {
-        inexor::tree::Value val;
-        inexor::tree::innerqueue q;
-        val.mainpath().
-        q.set_innerthing();
-        val.set_innerqueue(q);
-        main2net_interthread_queue.enqueue(val);
+    // we pass a pointer to the variable instead of the variablename to the main thread (thats faster, and no mainthread function need to be generated).
+    // Note that the pointer is valid as long as we deal with static data only (sidenote for vectors).
+    void *ptr2var;
+
+    union {
+        const char *valuechar;
+        int64 valueint;
+        float valuefloat;
     };
-    SharedVar j;
-    j.onchange.connect(lambdaj);
-}
+};
 
-// This one too:
-void connectnet2main(inexor::tree::Value receivedval)
-{
-option1:
-    loop over all values; / or findsetfield() somehow
-    switchcase for all values;
-    security layer in switch case (generated).
-    return net2main_interthread_queue.enque(SharedVar *pointer)
-}
-*/
-
-moodycamel::ConcurrentQueue<std::string> main2net_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when we changed value. Gets handled by serverthread.
-moodycamel::ConcurrentQueue<std::string> net2main_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when a value has arrived. Gets handled by Subsystem::tick();
+moodycamel::ConcurrentQueue<ChangedValue> main2net_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when we changed values. Gets handled by serverthread.
+moodycamel::ConcurrentQueue<std::string> net2main_interthread_queue;  // Something gets pushed on this (lockless threadsafe queue) when a value has arrived. Gets handled by Subsystem::tick();
 std::atomic_bool serverstarted = false;
 
-ChangedValue MakeChangedValue(const char *path)
+// This one gets generated
+extern SharedVar<char *> prefabdir; // no leading ::
+extern SharedVar<int> fullscreen;
+
+// this one too:
+void connectall()
 {
-    ChangedValue c;
-    c.set_path(path);
-    return c;
+    auto lambdaprefabdir = [](const char *oldvalue, const char *newvalue)
+    {
+        ChangedValue val;
+        val.set_path(newvalue);
+        main2net_interthread_queue.enqueue(val.path());
+    };
+    prefabdir.onChange.connect(lambdaprefabdir);
 }
+
+
+// This one too:
+void connectnet2main(ChangedValue &receivedval)
+{
+    int64 index = receivedval.oneofdata_case() - 1;
+    assert(index >= 0);
+
+    /// (proto)index -> pointer to the to-be-updated-variable.
+    std::unordered_map<int64, void *> cppvar_pointer_map 
+    {
+        // { index, pointer_to_the_changed_var (see net2maintupel::ptr2var) }
+        {1, (void *) &prefabdir},
+        {2, (void *) &fullscreen}
+    };
+
+    enum DATA_TYPES
+    {
+        STRING_TYPE, INT_TYPE, FLOAT_TYPE
+    };
+
+    /// (proto)index -> Data type
+    std::unordered_map<int64, DATA_TYPES> index_to_type_map
+    {
+        {1, STRING_TYPE}, // prefabdir
+        {2, INT_TYPE}     // fullscreen
+    };
+    std::unordered_map<const char*, DATA_TYPES> typestring_to_type_map
+    {
+        {"string", STRING_TYPE},
+        {"int64", INT_TYPE},
+        {"float", FLOAT_TYPE}
+    };
+
+    auto ptr2variable_itr = cppvar_pointer_map.find(index);
+    auto expected_type_itr = index_to_type_map.find(index);
+
+    if(ptr2variable_itr == cppvar_pointer_map.end() || expected_type_itr == index_to_type_map.end())
+    {
+        spdlog::get("global")->debug() << "network: received non-supported index: " << index;
+        return;
+    }
+
+    auto receivedtype_itr = typestring_to_type_map.find(receivedval.GetTypeName().c_str());
+    if(receivedtype_itr == typestring_to_type_map.end() || receivedtype_itr->second != expected_type_itr->second)
+    {
+        spdlog::get("global")->debug("newtork: received wrong typed index: {} (expected {}, got {})", index, receivedtype_itr->second, expected_type_itr->second);
+        return;
+    }
+    DATA_TYPES type = receivedtype_itr->second;
+
+    //security layer in switch case (generated).
+    // bool allow_update = checkaccesslevels(ChangedValue &val);
+
+    net2maintupel queuetupel;
+    queuetupel.ptr2var = ptr2variable_itr->second;
+    switch(type)
+    {
+        case STRING_TYPE: 
+        { 
+            auto field = receivedval.GetDescriptor()->FindFieldByNumber(index);
+            field->CppTypeName
+            receivedval.GetReflection()->GetStringReference(receivedval, field);
+            queuetupel.valuechar = receivedval.path().c_str();
+            break;
+        }
+        case INT_TYPE:
+        {
+
+            break;
+        }
+        case FLOAT_TYPE:
+        {
+
+            break;
+        }
+    }
+    // net2main_interthread_queue.enque();
+}
+
 
 /// Bidirectional Server (able to read and write) which receives changes from our sendchangequeue/the network 
 /// and put it into the network/readchangequeue (respectively)
@@ -117,9 +189,9 @@ class BiDiServer
             stream->Read(&change, (void *)this); // we pass the address of this class as the callback tag we retrieve on completion from cq.Next()
         }
 
-        void startwrite(const std::string &str)
+        void startwrite(ChangedValue &&newval)
         {
-            change = MakeChangedValue(str.c_str());
+            change = std::move(newval);
             stream->Write(change, (void *)this);
         }
     };
@@ -170,28 +242,19 @@ public:
     {
         GPR_ASSERT(writer != nullptr && reader != nullptr);
 
-        std::vector<std::string> testservermsgs{
-            "1. server2client message",
-            "2. server2client message",
-            "3. server2client message",
-            "4. server2client message"
-        };
-
         reader->startreading();
 
-        int i = 0;
         while(serverstarted)
         {
-            std::string queueout;
-            if(!writer->isbusy && i < 4)
+
+            if(!writer->isbusy)
             {
-                writer->isbusy = true;
-                writer->startwrite(testservermsgs[i]);
-                i++;
-            }
-            else if(!writer->isbusy && main2net_interthread_queue.try_dequeue(queueout))
-            {
-                writer->startwrite(queueout);
+                ChangedValue nextsenditem;
+                if(main2net_interthread_queue.try_dequeue(nextsenditem))
+                {
+                    writer->startwrite(std::move(nextsenditem));
+                    writer->isbusy = true;
+                }
             }
 
             void *tag;
@@ -265,8 +328,11 @@ void RunServer()
 void sendtestmessage(const char *message)
 {
     std::string gotback;
-    if(net2main_interthread_queue.try_dequeue(gotback))
-        spdlog::get("global")->info() << "Mainthread: " << gotback;
+    if(net2main_interthread_queue.try_dequeue(gotback))  spdlog::get("global")->info() << "Mainthread: " << gotback;
+    ChangedValue c;
+    c.set_otherpath("heyho!");
+    int ind =  c.oneofdata_case();
+    spdlog::get("global")->info() << "index no2?: " << ind;
     main2net_interthread_queue.enqueue(message);
 }
 
