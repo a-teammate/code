@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <stdint.h>
+#include <string.h>
 
 #include <grpc/grpc.h>
 #include <grpc++/channel.h>
@@ -43,23 +44,31 @@ using grpc::ServerCompletionQueue;
 using inexor::tree::ChangedValue;
 using inexor::tree::TreeService;
 
+using std::string;
 typedef int64_t int64; // size is important for us, proto explicitly specifies int64
+
+using FldDesc = google::protobuf::FieldDescriptor;
 
 struct net2maintupel
 {
     // we pass a pointer to the variable instead of the variablename to the main thread (thats faster, and no mainthread function need to be generated).
     // Note that the pointer is valid as long as we deal with static data only (sidenote for vectors).
     void *ptr2var;
+    int type;
 
     union {
-        const char *valuechar;
+        std::string *valuestr;
         int64 valueint;
         float valuefloat;
     };
+    ~net2maintupel()
+    {
+        //delete valuestr;
+    }
 };
 
-moodycamel::ConcurrentQueue<ChangedValue> main2net_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when we changed values. Gets handled by serverthread.
-moodycamel::ConcurrentQueue<std::string> net2main_interthread_queue;  // Something gets pushed on this (lockless threadsafe queue) when a value has arrived. Gets handled by Subsystem::tick();
+moodycamel::ConcurrentQueue<ChangedValue>  main2net_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when we changed values. Gets handled by serverthread.
+moodycamel::ConcurrentQueue<net2maintupel> net2main_interthread_queue; // Something gets pushed on this (lockless threadsafe queue) when a value has arrived. Gets handled by Subsystem::tick();
 std::atomic_bool serverstarted = false;
 
 // This one gets generated
@@ -72,90 +81,83 @@ void connectall()
     auto lambdaprefabdir = [](const char *oldvalue, const char *newvalue)
     {
         ChangedValue val;
-        val.set_path(newvalue);
-        main2net_interthread_queue.enqueue(val.path());
+        val.set_prefabdir(newvalue);
+        main2net_interthread_queue.enqueue(std::move(val));
     };
-    prefabdir.onChange.connect(lambdaprefabdir);
+    ::prefabdir.onChange.connect(lambdaprefabdir);
 }
+/// (proto)index -> pointer to the to-be-updated-variable.
+const std::unordered_map<int64, void *> cppvar_pointer_map 
+{
+    // { index, pointer_to_the_changed_var (see net2maintupel::ptr2var) }
+    {1, (void *) &::prefabdir},
+    {2, (void *) &::fullscreen}
+};
 
+/// (proto)index -> Data type
+const std::unordered_map<int64, FldDesc::CppType> index_to_type_map
+{
+    {1, FldDesc::CppType::CPPTYPE_STRING}, // prefabdir
+    {2, FldDesc::CppType::CPPTYPE_INT64}   // fullscreen
+};
 
 // This one too:
 void connectnet2main(ChangedValue &receivedval)
 {
-    int64 index = receivedval.oneofdata_case() - 1;
-    assert(index >= 0);
 
-    /// (proto)index -> pointer to the to-be-updated-variable.
-    std::unordered_map<int64, void *> cppvar_pointer_map 
-    {
-        // { index, pointer_to_the_changed_var (see net2maintupel::ptr2var) }
-        {1, (void *) &prefabdir},
-        {2, (void *) &fullscreen}
-    };
-
-    enum DATA_TYPES
-    {
-        STRING_TYPE, INT_TYPE, FLOAT_TYPE
-    };
-
-    /// (proto)index -> Data type
-    std::unordered_map<int64, DATA_TYPES> index_to_type_map
-    {
-        {1, STRING_TYPE}, // prefabdir
-        {2, INT_TYPE}     // fullscreen
-    };
-    std::unordered_map<const char*, DATA_TYPES> typestring_to_type_map
-    {
-        {"string", STRING_TYPE},
-        {"int64", INT_TYPE},
-        {"float", FLOAT_TYPE}
-    };
+    int64 index = receivedval.oneofdata_case();
+    assert(index > 0); // actually we'd need sth else than assert
 
     auto ptr2variable_itr = cppvar_pointer_map.find(index);
     auto expected_type_itr = index_to_type_map.find(index);
 
     if(ptr2variable_itr == cppvar_pointer_map.end() || expected_type_itr == index_to_type_map.end())
     {
-        spdlog::get("global")->debug() << "network: received non-supported index: " << index;
+        spdlog::get("global")->info() << "network: received non-supported index: " << index; // -> to debug
         return;
     }
-
-    auto receivedtype_itr = typestring_to_type_map.find(receivedval.GetTypeName().c_str());
-    if(receivedtype_itr == typestring_to_type_map.end() || receivedtype_itr->second != expected_type_itr->second)
-    {
-        spdlog::get("global")->debug("newtork: received wrong typed index: {} (expected {}, got {})", index, receivedtype_itr->second, expected_type_itr->second);
-        return;
-    }
-    DATA_TYPES type = receivedtype_itr->second;
+    //receivedval.GetDescriptor()->oneof_decl.
+    //receivedval.GetDescriptor()->containing_type.enum_type;
+    //auto receivedtype_itr = typestring_to_type_map.find(receivedval.GetTypeName().c_str());
+    //if(receivedtype_itr == typestring_to_type_map.end() || receivedtype_itr->second != expected_type_itr->second)
+    //{
+    //    spdlog::get("global")->debug("network: received wrong typed index: {} (expected {}, got {})", index, receivedtype_itr->second, expected_type_itr->second);
+    //    return;
+    //}
+    //DATA_TYPES type = receivedtype_itr->second;
 
     //security layer in switch case (generated).
     // bool allow_update = checkaccesslevels(ChangedValue &val);
 
+    auto type = expected_type_itr->second;
+    auto field = receivedval.GetDescriptor()->FindFieldByNumber(index);
+
     net2maintupel queuetupel;
     queuetupel.ptr2var = ptr2variable_itr->second;
+    queuetupel.type = type;
+
     switch(type)
-    {
-        case STRING_TYPE: 
+    { // TODO: renew this passage to generated shit for every variable to get rid of (runtime?) reflection (only in case its runtime reflection ofc)
+        case FldDesc::CppType::CPPTYPE_STRING:
         { 
-            auto field = receivedval.GetDescriptor()->FindFieldByNumber(index);
-            field->CppTypeName
-            receivedval.GetReflection()->GetStringReference(receivedval, field);
-            queuetupel.valuechar = receivedval.path().c_str();
+            queuetupel.valuestr = new std::string(receivedval.GetReflection()->GetString(receivedval, field));; //TODO: THIS MEMORY MANAGMENT SUCKS!
             break;
         }
-        case INT_TYPE:
+        case FldDesc::CppType::CPPTYPE_INT64:
+        case FldDesc::CppType::CPPTYPE_INT32:
         {
-
+            queuetupel.valueint = receivedval.GetReflection()->GetInt64(receivedval, field);
             break;
         }
-        case FLOAT_TYPE:
+        case FldDesc::CppType::CPPTYPE_FLOAT:
         {
-
+            queuetupel.valuefloat = receivedval.GetReflection()->GetFloat(receivedval, field);
             break;
         }
     }
-    // net2main_interthread_queue.enque();
+    net2main_interthread_queue.enqueue(std::move(queuetupel));
 }
+// TODO: create INEXOR_ASSERT in utils, writing to logger
 
 
 /// Bidirectional Server (able to read and write) which receives changes from our sendchangequeue/the network 
@@ -272,13 +274,13 @@ public:
 
                 if(completed->type == CallInstance::WRITER)
                 {
-                    spdlog::get("global")->info() << "[Server] Sent: " << completed->change.path();
+                    //spdlog::get("global")->info() << "[Server] Sent: " << completed->change.path();
                     completed->isbusy = false;
                 }
                 else
                 {
-                    spdlog::get("global")->info() << "[Server] Received: " << completed->change.path();
-                    net2main_interthread_queue.enqueue(completed->change.path());
+                    //spdlog::get("global")->info() << "[Server] Received: " << completed->change.prefabdir();
+                    connectnet2main(completed->change);
                     reader->startreading(); // request new read
                 }
             }
@@ -325,15 +327,39 @@ void RunServer()
     t.detach();
 }
 
-void sendtestmessage(const char *message)
+void main_handle_message()
 {
-    std::string gotback;
-    if(net2main_interthread_queue.try_dequeue(gotback))  spdlog::get("global")->info() << "Mainthread: " << gotback;
-    ChangedValue c;
-    c.set_otherpath("heyho!");
-    int ind =  c.oneofdata_case();
-    spdlog::get("global")->info() << "index no2?: " << ind;
-    main2net_interthread_queue.enqueue(message);
+    net2maintupel queuetupel;
+    if(net2main_interthread_queue.try_dequeue(queuetupel)) // spdlog::get("global")->info() << "Mainthread: " << gotback;
+    {
+        switch(queuetupel.type)
+        {
+        case FldDesc::CppType::CPPTYPE_STRING:
+        {
+            SharedVar<char *> *changed = static_cast<SharedVar<char *>*> (queuetupel.ptr2var);
+            changed->setnosync(strdup(queuetupel.valuestr->c_str()));
+            break;
+        }
+        case FldDesc::CppType::CPPTYPE_INT64:
+        case FldDesc::CppType::CPPTYPE_INT32:
+        {
+            SharedVar<int> *changed = static_cast<SharedVar<int>*> (queuetupel.ptr2var);
+            changed->setnosync(queuetupel.valueint);
+            break;
+        }
+        case FldDesc::CppType::CPPTYPE_FLOAT:
+        {
+            SharedVar<float> *changed = static_cast<SharedVar<float>*> (queuetupel.ptr2var);
+            changed->setnosync(queuetupel.valuefloat);
+            break;
+        }
+        }
+    }
+    //ChangedValue c;
+    //c.set_otherpath("heyho!");
+    //int ind =  c.oneofdata_case();
+    //spdlog::get("global")->info() << "index no2?: " << ind;
+    //main2net_interthread_queue.enqueue(message);
 }
 
 //////// Client
@@ -343,7 +369,12 @@ void sendtestmessage(const char *message)
 class RouteGuideClient
 {
 private:
-
+    ChangedValue maketestmsg_prefabdir()
+    {
+        ChangedValue t;
+        t.set_prefabdir("prefabtestmessage");
+        return t;
+    }
 
 
 public:
@@ -368,20 +399,11 @@ public:
             const int writetag = 4;
             const int readtag =  3;
 
-            const std::vector<ChangedValue> testclientmsgs{
-                MakeChangedValue("1. client2server message"),
-                MakeChangedValue("2. client2server message"),
-                MakeChangedValue("3. client2server message"),
-                MakeChangedValue("4. client2server message")
-            };
-            auto msgiterator = testclientmsgs.begin();
             ChangedValue receivedvalue;
 
-            stream->Write(*msgiterator, (void *)writetag);
+            stream->Write(maketestmsg_prefabdir(), (void *)writetag);
             stream->Read(&receivedvalue, (void *)readtag);
 
-            void *tag;
-            bool ok = false;
             while(true)
             {
                 cq.Next(&tag, &ok);
@@ -392,16 +414,16 @@ public:
                 }
                 if(tag == (void *)writetag)
                 {
-                    spdlog::get("global")->info() << "[Client] Sent: " << msgiterator->path();
-                    msgiterator++;
-                    if(msgiterator != testclientmsgs.end())
+                    spdlog::get("global")->info() << "[Client] Sent: "; // << msgiterator->path();
+                  //  msgiterator++;
+                  //  if(msgiterator != testclientmsgs.end())
                     {
-                        stream->Write(*msgiterator, (void *)writetag);
+                   //     stream->Write(*msgiterator, (void *)writetag);
                     }
                 }
                 else if(tag == (void *)readtag)
                 {
-                    spdlog::get("global")->info() << "[Client] Received: " << receivedvalue.path();
+                    spdlog::get("global")->info() << "[Client] Received: " << receivedvalue.prefabdir();
                     stream->Read(&receivedvalue, (void *)readtag);
                 }
               //  stream->WritesDone();
