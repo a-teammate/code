@@ -11,8 +11,10 @@
 # Windows-note: Make sure all slashes are unix style! / instead of \ 
 
 set(LLVM_DIR "E:/weitere-Dokumente/Software/llvm-3.8.0.src")
+# set(LLVM_DIR "/usr/lib/llvm-3.8")
 
 set(LLVM_LIB_DIR "E:/weitere-Dokumente/Software/llvm-3.8.0.src/build/MinSizeRel/lib")
+# set(LLVM_LIB_DIR "/usr/lib/llvm-3.8/lib")
 
 # If you followed the clang build tutorial step by step and also named your llvm build folder
 # "build", then the lines below need no further adaption, but just LLVM_DIR above.
@@ -68,7 +70,7 @@ target_link_libs(gluecodegenerator ${LLVM_LIBS})
 require_threads(gluecodegenerator)
 require_zlib(gluecodegenerator)
 
-if(COMPILER_GNU OR COMPILER_CLANG)
+if(COMPILER_GCC OR COMPILER_CLANG)
   target_link_libs(gluecodegenerator dl tinfo)
 endif()
 
