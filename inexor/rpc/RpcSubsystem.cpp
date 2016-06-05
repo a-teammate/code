@@ -17,7 +17,7 @@
 
 #include "inexor/rpc/RpcSubsystem.hpp"
 #include "inexor/util/Logging.hpp"
-#include "inexor/rpc/SharedVar.hpp"
+#include "inexor/rpc/SharedTree.hpp"
 
 #include "inexor/rpc/inexor_service.grpc.pb.h"
 
