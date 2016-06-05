@@ -21,14 +21,17 @@ set(CLANG_FLAGS_AND_DEFS
 
 # Search sources
 file(GLOB_RECURSE PARSED_FILES ${SOURCE_DIR}/**.cpp)
-set(PARSED_FILES "E:/weitere-Dokumente/Git/code2/inexor/fpsgame/ai.cpp")
+#set(PARSED_FILES "E:/weitere-Dokumente/Git/code2/inexor/fpsgame/ai.cpp")
 set(ALL_PARSED_FILES "")
 
 set(FLAGS_AND_DEFS "-pipe -fsyntax-only -fno-strict-aliasing -fsigned-char -w -fdiagnostics-show-option -fno-threadsafe-statics -std=c++14  -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -I\"E:/weitere-Dokumente/Git/code2/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/all/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/windows/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/windows/SDL2/\" -frtti -fexceptions -DWIN32 -D_WIN32 -D_WINDOWS -DWINDOWS -DNOMINMAX -D_WIN32_WINNT=0x0600 -D_MATH_DEFINES_DEFINED -DWIN64 -DBOOST_OS_WINDOWS -DBOOST_ASIO_HAS_STD_CHRONO -D__REFLECTION_PASS__ -fno-ms-compatibility")
 
 
-set(FLAGS_AND_DEFS "-pipe -fno-strict-aliasing -fsigned-char -Wall -Wno-switch -Wno-deprecated-declarations -Wno-missing-braces -fdiagnostics-show-option -fno-threadsafe-statics -std=c++14  -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -I\"E:/weitere-Dokumente/Git/code2/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/all/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/windows/\" -I\"E:/weitere-Dokumente/Git/code2/platform/include/windows/SDL2/\" -frtti -fexceptions -DWIN32 -D_WIN32 -D_WINDOWS -DWINDOWS -DNOMINMAX -D_WIN32_WINNT=0x0600 -D_MATH_DEFINES_DEFINED -DWIN64 -DBOOST_OS_WINDOWS -DBOOST_ASIO_HAS_STD_CHRONO -D__REFLECTION_PASS__ -fno-ms-compatibility")
+set(FLAGS_AND_DEFS "-pipe -fno-strict-aliasing -fsigned-char -Wall -Wno-switch -Wno-deprecated-declarations -Wno-missing-braces -fdiagnostics-show-option -fno-threadsafe-statics -std=c++14  -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -I\"${MAINDIR}\" -I\"${MAINDIR}/platform/include/all/\" -frtti -fexceptions -D__REFLECTION_PASS__ ")
 
+if(COMPILER_MSVC)
+  set(FLAGS_AND_DEFS "${FLAGS_AND_DEFS} -\"I${MAINDIR}/platform/include/windows/\" -I\"${MAINDIR}/platform/include/windows/SDL2/\" -fno-ms-compatibility -DWIN32 -D_WIN32 -D_WINDOWS -DWINDOWS -DNOMINMAX -D_WIN32_WINNT=0x0600 -D_MATH_DEFINES_DEFINED -DWIN64 -DBOOST_OS_WINDOWS -DBOOST_ASIO_HAS_STD_CHRONO")
+endif()
 
 foreach(curfile ${PARSED_FILES})
   set(ALL_PARSED_FILES "${ALL_PARSED_FILES} --parse-file ${curfile}")
